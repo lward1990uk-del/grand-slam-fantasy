@@ -1,0 +1,421 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Grand Slam Fantasy | Admin</title>
+<style>
+:root {
+  color-scheme:dark;
+  font-family:system-ui,sans-serif;
+  background:#0b0e14;
+  color:#f6f5ef;
+}
+* {box-sizing:border-box}
+body {margin:0}
+.wrap {max-width:680px;margin:auto;padding:24px 18px}
+h1 {font-size:30px;margin:0 0 8px}
+h2 {font-size:21px}
+p,.muted {color:#b4bdcb}
+.panel {
+  background:#171c27;
+  border:1px solid #354052;
+  border-radius:14px;
+  padding:20px;
+  margin:18px 0;
+}
+label {display:block;font-weight:700;margin:15px 0 6px}
+input,select,button {
+  font:inherit;
+  width:100%;
+  padding:12px;
+  border-radius:9px;
+}
+input,select {
+  background:#252d3b;
+  border:1px solid #556073;
+  color:white;
+}
+button {
+  border:0;
+  background:#f4c95d;
+  color:#161512;
+  font-weight:800;
+  cursor:pointer;
+  margin-top:16px;
+}
+button:disabled {opacity:.55;cursor:not-allowed}
+.secondary {background:#303b4b;color:white}
+.row {display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.hidden {display:none}
+.status {
+  white-space:pre-wrap;
+  padding:10px 0;
+  color:#a9e8c7;
+}
+.error {color:#ffabab}
+.budget {font-size:24px;font-weight:900;color:#f4c95d}
+a {color:#f4c95d}
+small {color:#b4bdcb}
+</style>
+</head>
+<body>
+<main class="wrap">
+<p><a href="./">← Public leaderboard</a></p>
+<h1>🎯 Fantasy Admin</h1>
+<p>Only authorised administrators can publish teams.</p>
+
+<section id="loginPanel" class="panel">
+<h2>Sign in</h2>
+
+<label for="email">Email</label>
+<input id="email" type="email" autocomplete="username">
+
+<label for="password">Password</label>
+<input id="password" type="password"
+       autocomplete="current-password">
+
+<button id="login">Sign in</button>
+</section>
+
+<section id="editor" class="panel hidden">
+<div class="row">
+<h2>Enter a team</h2>
+<button id="logout" class="secondary"
+        style="margin:0">Sign out</button>
+</div>
+
+<label for="managerName">Manager name</label>
+<input
+  id="managerName"
+  maxlength="100"
+  placeholder="e.g. Liam Ward"
+  autocomplete="off"
+>
+
+<label for="teamName">Fantasy team name</label>
+<input
+  id="teamName"
+  maxlength="100"
+  placeholder="e.g. Wardy's Warriors"
+  autocomplete="off"
+>
+
+<div id="pickFields"></div>
+
+<label for="captain">Captain (double points)</label>
+<select id="captain">
+<option value="">Select your captain</option>
+</select>
+
+<p>
+ Budget used:
+ <span id="budget" class="budget">£0m</span>
+ / £100m
+</p>
+
+<label>
+<input id="confirm" type="checkbox" style="width:auto">
+I have checked the picks. Publish and lock this team.
+</label>
+
+<button id="save" disabled>Publish locked team</button>
+
+<p>
+<small>
+Published teams cannot be edited through this page.
+Do not submit twice.
+</small>
+</p>
+</section>
+
+<div id="message" class="status"
+     role="status" aria-live="polite"></div>
+</main>
+
+<script src="./supabase-config.js"></script>
+<script>
+(() => {
+'use strict';
+
+const cfg=window.GRAND_SLAM_SUPABASE;
+const $=id=>document.getElementById(id);
+
+const msg=(s,error=false)=>{
+  $('message').textContent=s;
+  $('message').className='status'+(error?' error':'');
+};
+
+if(!cfg?.url || !cfg?.publishableKey){
+  msg('Missing Supabase configuration.',true);
+  return;
+}
+
+const base=cfg.url.replace(/\/$/,'');
+let accessToken=null;
+let players=[];
+let saving=false;
+
+async function request(path,method='GET',body=null,token=null){
+  const headers={'apikey':cfg.publishableKey};
+
+  if(token){
+    headers.Authorization='Bearer '+token;
+  }
+
+  if(body!==null){
+    headers['Content-Type']='application/json';
+  }
+
+  const r=await fetch(base+path,{
+    method,
+    headers,
+    body:body===null?undefined:JSON.stringify(body),
+    cache:'no-store'
+  });
+
+  const raw=await r.text();
+  let result;
+
+  try{
+    result=raw?JSON.parse(raw):null;
+  }catch{
+    result=raw;
+  }
+
+  if(!r.ok){
+    throw Error(
+      (result && typeof result==='object' &&
+      (result.message||
+       result.error_description||
+       result.error))
+      || `Request failed (${r.status})`
+    );
+  }
+
+  return result;
+}
+
+function clearSession(){
+  accessToken=null;
+  $('editor').classList.add('hidden');
+  $('loginPanel').classList.remove('hidden');
+  $('password').value='';
+}
+
+async function loadPlayers(){
+  const rows=await request(
+    '/rest/v1/players?select=id,name,price&active=eq.true&order=price.desc',
+    'GET',null,accessToken
+  );
+
+  if(!Array.isArray(rows)||!rows.length){
+    throw Error('No active players available.');
+  }
+
+  players=rows;
+  const holder=$('pickFields');
+  holder.replaceChildren();
+
+  for(let i=0;i<6;i++){
+    const label=document.createElement('label');
+    label.textContent=`Player ${i+1}`;
+    label.htmlFor=`pick${i}`;
+
+    const sel=document.createElement('select');
+    sel.id=`pick${i}`;
+    sel.className='pick';
+
+    const placeholder=document.createElement('option');
+    placeholder.value='';
+    placeholder.textContent='Choose player';
+    sel.append(placeholder);
+
+    for(const p of players){
+      const option=document.createElement('option');
+      option.value=p.id;
+      option.textContent=
+        `${p.name} — £${Number(p.price)}m`;
+      sel.append(option);
+    }
+
+    sel.addEventListener('change',update);
+    holder.append(label,sel);
+  }
+
+  update();
+}
+
+function update(){
+  const ids=[...document.querySelectorAll('.pick')]
+    .map(x=>x.value)
+    .filter(Boolean);
+
+  const unique=new Set(ids);
+
+  const cost=ids.reduce(
+    (n,id)=>n+Number(
+      players.find(p=>String(p.id)===id)?.price||0
+    ),0
+  );
+
+  $('budget').textContent=
+    `£${cost.toFixed(1).replace(/\.0$/,'')}m`;
+
+  $('budget').style.color=
+    cost>100?'#ffabab':'#f4c95d';
+
+  const old=$('captain').value;
+  $('captain').replaceChildren();
+
+  const blank=document.createElement('option');
+  blank.value='';
+  blank.textContent='Select your captain';
+  $('captain').append(blank);
+
+  for(const id of unique){
+    const p=players.find(p=>String(p.id)===id);
+    if(!p)continue;
+
+    const o=document.createElement('option');
+    o.value=id;
+    o.textContent=p.name;
+    $('captain').append(o);
+  }
+
+  if(unique.has(old)){
+    $('captain').value=old;
+  }
+
+  $('save').disabled=
+    saving ||
+    !$('managerName').value.trim() ||
+    !$('teamName').value.trim() ||
+    ids.length!==6 ||
+    unique.size!==6 ||
+    cost>100 ||
+    !$('captain').value ||
+    !$('confirm').checked;
+}
+
+$('managerName').addEventListener('input',update);
+$('teamName').addEventListener('input',update);
+$('captain').addEventListener('change',update);
+$('confirm').addEventListener('change',update);
+
+$('login').addEventListener('click',async()=>{
+  $('login').disabled=true;
+  msg('Signing in…');
+
+  try{
+    const auth=await request(
+      '/auth/v1/token?grant_type=password',
+      'POST',
+      {
+        email:$('email').value.trim(),
+        password:$('password').value
+      }
+    );
+
+    accessToken=auth.access_token;
+
+    const check=await request(
+      '/rest/v1/rpc/is_fantasy_admin',
+      'POST',{},accessToken
+    );
+
+    if(check!==true){
+      throw Error(
+        'This account is not authorised as a fantasy administrator.'
+      );
+    }
+
+    await loadPlayers();
+
+    $('loginPanel').classList.add('hidden');
+    $('editor').classList.remove('hidden');
+
+    msg('Signed in. Ready to enter a team.');
+
+  }catch(e){
+    clearSession();
+    msg(e.message,true);
+  }finally{
+    $('login').disabled=false;
+  }
+});
+
+$('logout').addEventListener('click',async()=>{
+  const token=accessToken;
+  clearSession();
+
+  if(token){
+    try{
+      await request(
+        '/auth/v1/logout','POST',{},token
+      );
+    }catch{}
+  }
+
+  msg('Signed out.');
+});
+
+$('save').addEventListener('click',async()=>{
+  update();
+
+  if($('save').disabled)return;
+
+  const ids=[...document.querySelectorAll('.pick')]
+    .map(x=>Number(x.value));
+
+  const captain=Number($('captain').value);
+
+  if(
+    ids.length!==6 ||
+    new Set(ids).size!==6 ||
+    !ids.includes(captain)
+  )return;
+
+  saving=true;
+  update();
+  msg('Saving your team…');
+
+  try{
+    const result=await request(
+      '/rest/v1/rpc/create_fantasy_team',
+      'POST',
+      {
+        p_name:$('teamName').value.trim(),
+        p_manager_name:$('managerName').value.trim(),
+        p_player_ids:ids,
+        p_captain_id:captain
+      },
+      accessToken
+    );
+
+    $('managerName').value='';
+    $('teamName').value='';
+
+    document.querySelectorAll('.pick')
+      .forEach(s=>s.value='');
+
+    $('confirm').checked=false;
+    update();
+
+    msg(
+      `Team published and locked successfully. ID: ${result}`
+    );
+
+  }catch(e){
+    msg('Team was not saved: '+e.message,true);
+  }finally{
+    saving=false;
+    update();
+  }
+});
+
+})();
+</script>
+</body>
+</html>
